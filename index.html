@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPT-4o Chat</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <button class="new-chat-btn" id="newChatBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          新しいチャット
+        </button>
+      </div>
+      <div class="sidebar-conversations" id="conversationList"></div>
+      <div class="sidebar-footer">
+        <button class="settings-btn" id="settingsBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+          設定
+        </button>
+      </div>
+    </aside>
+
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+    <main class="main">
+      <header class="main-header">
+        <button class="sidebar-toggle" id="sidebarToggle">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <div class="model-selector">
+          <span class="model-name">GPT-4o</span>
+          <select id="modelSelect">
+            <option value="openai/gpt-4o">GPT-4o</option>
+            <option value="openai/gpt-4o-mini">GPT-4o mini</option>
+          </select>
+        </div>
+      </header>
+
+      <div class="chat-container" id="chatContainer">
+        <div class="welcome-screen" id="welcomeScreen">
+          <div class="welcome-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></svg>
+          </div>
+          <h1>何かお手伝いできますか？</h1>
+          <div class="welcome-suggestions">
+            <button class="suggestion" data-prompt="Pythonで簡単なWebスクレイパーを作る方法を教えて">Pythonでスクレイパーを作成</button>
+            <button class="suggestion" data-prompt="量子コンピュータについてわかりやすく説明して">量子コンピュータを解説</button>
+            <button class="suggestion" data-prompt="JavaScriptのPromiseとasync/awaitの違いを説明して">Promise vs async/await</button>
+            <button class="suggestion" data-prompt="効果的なプレゼンテーションの構成方法を教えて">プレゼンの構成方法</button>
+          </div>
+        </div>
+        <div class="messages" id="messages"></div>
+      </div>
+
+      <div class="input-area">
+        <div class="attachments-preview" id="attachmentsPreview"></div>
+        <div class="input-wrapper">
+          <button class="attach-btn" id="attachBtn" title="画像を添付">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <textarea id="messageInput" placeholder="メッセージを送信..." rows="1"></textarea>
+          <button class="send-btn" id="sendBtn" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+          </button>
+          <button class="stop-btn hidden" id="stopBtn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+        <input type="file" id="fileInput" accept="image/*" multiple hidden>
+        <p class="disclaimer">GPT-4o via OpenRouter - 回答には誤りが含まれる場合があります</p>
+      </div>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="settingsModal">
+    <div class="modal-overlay" id="modalOverlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>設定</h2>
+        <button class="modal-close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="setting-group">
+          <label for="apiKeyInput">OpenRouter APIキー</label>
+          <div class="api-key-wrapper">
+            <input type="password" id="apiKeyInput" placeholder="sk-or-v1-...">
+            <button class="toggle-visibility" id="toggleApiKey">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="setting-group">
+          <label for="systemPromptInput">システムプロンプト</label>
+          <textarea id="systemPromptInput" rows="4" placeholder="You are a helpful assistant."></textarea>
+        </div>
+        <div class="setting-group">
+          <label for="tempSlider">Temperature: <span id="tempValue">0.7</span></label>
+          <input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7">
+        </div>
+        <div class="setting-group">
+          <label for="maxTokensInput">最大トークン数</label>
+          <input type="number" id="maxTokensInput" value="4096" min="1" max="128000">
+        </div>
+        <button class="save-settings-btn" id="saveSettingsBtn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
