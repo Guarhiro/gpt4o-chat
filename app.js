@@ -1,19 +1,45 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+const defaultSettings = {
+  apiKey: '',
+  systemPrompt: 'You are a helpful assistant.',
+  temperature: 0.7,
+  maxTokens: 4096,
+  model: 'openai/gpt-4o',
+  memoryEnabled: true,
+  globalMemory: '',
+  contextMode: 'recent',
+  contextMessageLimit: 20,
+  contextCharLimit: 60000,
+  includeImageHistory: false
+};
+
+function parseStoredJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
+  } catch {
+    return fallback;
+  }
+}
+
+function loadConversations() {
+  const conversations = parseStoredJson('conversations', []);
+  return Array.isArray(conversations) ? conversations : [];
+}
+
+function loadSettings() {
+  const stored = parseStoredJson('chatSettings', {});
+  return { ...defaultSettings, ...(stored && typeof stored === 'object' ? stored : {}) };
+}
+
 const state = {
-  conversations: JSON.parse(localStorage.getItem('conversations') || '[]'),
+  conversations: loadConversations(),
   currentConvId: null,
   attachments: [],
   isStreaming: false,
   abortController: null,
-  settings: JSON.parse(localStorage.getItem('chatSettings') || JSON.stringify({
-    apiKey: '',
-    systemPrompt: 'You are a helpful assistant.',
-    temperature: 0.7,
-    maxTokens: 4096,
-    model: 'openai/gpt-4o'
-  }))
+  settings: loadSettings()
 };
 
 const renderer = new marked.Renderer();
@@ -29,13 +55,29 @@ renderer.code = function(codeObj) {
   } catch {
     highlighted = escapeHtml(text);
   }
-  return `<pre><div class="code-header"><span>${langLabel}</span><button class="copy-code-btn" onclick="copyCode(this)">コピー</button></div><code class="hljs">${highlighted}</code></pre>`;
+  return `<pre><div class="code-header"><span>${escapeHtml(langLabel)}</span><button type="button" class="copy-code-btn">コピー</button></div><code class="hljs">${highlighted}</code></pre>`;
 };
 
 marked.setOptions({ renderer, breaks: true, gfm: true });
 
 function escapeHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderMarkdown(text) {
+  const html = marked.parse(text || '');
+  if (!window.DOMPurify) {
+    return escapeHtml(text || '').replace(/\n/g, '<br>');
+  }
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    ADD_TAGS: ['button'],
+    ADD_ATTR: ['type', 'class']
+  });
 }
 
 function copyCode(btn) {
@@ -59,7 +101,11 @@ function showError(msg) {
 }
 
 function saveConversations() {
-  localStorage.setItem('conversations', JSON.stringify(state.conversations));
+  try {
+    localStorage.setItem('conversations', JSON.stringify(state.conversations));
+  } catch {
+    showError('会話の保存に失敗しました。画像履歴が大きすぎる可能性があります');
+  }
 }
 
 function saveSettings() {
@@ -72,6 +118,7 @@ function createConversation() {
     id: generateId(),
     title: '新しいチャット',
     messages: [],
+    summary: '',
     createdAt: Date.now()
   };
   state.conversations.unshift(conv);
@@ -81,12 +128,14 @@ function createConversation() {
   renderMessages();
   $('#welcomeScreen').classList.remove('hidden');
   $('#messages').innerHTML = '';
+  if (isMobileLayout()) closeSidebar();
 }
 
 function switchConversation(id) {
   state.currentConvId = id;
   renderConversationList();
   renderMessages();
+  if (isMobileLayout()) closeSidebar();
 }
 
 function deleteConversation(id, e) {
@@ -155,12 +204,12 @@ function appendMessageToDOM(msg) {
   let imagesHtml = '';
   if (msg.images && msg.images.length > 0) {
     imagesHtml = `<div class="message-images">${msg.images.map(src =>
-      `<img src="${src}" alt="添付画像" onclick="openLightbox(this.src)">`
+      `<img src="${escapeAttr(src)}" alt="添付画像" class="message-image">`
     ).join('')}</div>`;
   }
 
   const contentHtml = msg.role === 'assistant'
-    ? marked.parse(msg.content || '')
+    ? renderMarkdown(msg.content || '')
     : escapeHtml(msg.content || '');
 
   div.innerHTML = `
@@ -184,7 +233,9 @@ function scrollToBottom() {
 function openLightbox(src) {
   const lb = document.createElement('div');
   lb.className = 'lightbox';
-  lb.innerHTML = `<img src="${src}">`;
+  const img = document.createElement('img');
+  img.src = src;
+  lb.appendChild(img);
   lb.addEventListener('click', () => lb.remove());
   document.body.appendChild(lb);
 }
@@ -219,7 +270,7 @@ function renderAttachments() {
     const thumb = document.createElement('div');
     thumb.className = 'attachment-thumb';
     thumb.innerHTML = `
-      <img src="${att.dataUrl}" alt="添付">
+      <img src="${escapeAttr(att.dataUrl)}" alt="添付">
       <button class="remove-attachment" data-index="${i}">&times;</button>
     `;
     thumb.querySelector('.remove-attachment').addEventListener('click', () => {
@@ -238,6 +289,89 @@ function updateSendBtn() {
   sendBtn.disabled = !hasContent;
 }
 
+function clampNumber(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(Math.max(num, min), max);
+}
+
+function estimateMessageCharacters(msg) {
+  const textLength = typeof msg.content === 'string' ? msg.content.length : 0;
+  const imageCost = (msg.images?.length || 0) * 4000;
+  return textLength + imageCost;
+}
+
+function limitMessagesByCharacters(messages, charLimit) {
+  const limit = Number(charLimit);
+  if (!Number.isFinite(limit) || limit <= 0) return messages;
+
+  const kept = [];
+  let total = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const size = estimateMessageCharacters(msg);
+    if (kept.length > 0 && total + size > limit) break;
+    kept.unshift(msg);
+    total += size;
+  }
+  return kept;
+}
+
+function messageToApiMessage(msg, latestUserMessage) {
+  if (msg.role === 'assistant') {
+    return { role: 'assistant', content: msg.content || '' };
+  }
+
+  const shouldSendImages = msg.images?.length > 0
+    && (state.settings.includeImageHistory || msg === latestUserMessage);
+
+  if (!shouldSendImages) {
+    const omitted = msg.images?.length > 0 ? '\n[過去の画像はコンテキスト節約のため省略されています]' : '';
+    return { role: 'user', content: `${msg.content || ''}${omitted}`.trim() || '[画像は省略されています]' };
+  }
+
+  const parts = msg.images.map(img => ({
+    type: 'image_url',
+    image_url: { url: img }
+  }));
+  if (msg.content) parts.push({ type: 'text', text: msg.content });
+  return { role: 'user', content: parts };
+}
+
+function buildApiMessages(conv) {
+  const apiMessages = [];
+  const systemParts = [];
+  const memory = state.settings.globalMemory?.trim();
+  const summary = conv.summary?.trim();
+
+  if (state.settings.systemPrompt?.trim()) {
+    systemParts.push(state.settings.systemPrompt.trim());
+  }
+  if (state.settings.memoryEnabled && memory) {
+    systemParts.push(`Persistent memory for this user:\n${memory}`);
+  }
+  if (state.settings.contextMode === 'summary' && summary) {
+    systemParts.push(`Summary of earlier conversation:\n${summary}`);
+  }
+  if (systemParts.length > 0) {
+    apiMessages.push({ role: 'system', content: systemParts.join('\n\n') });
+  }
+
+  const conversationMessages = conv.messages.filter(m => m.role === 'user' || m.role === 'assistant');
+  const latestUserMessage = [...conversationMessages].reverse().find(m => m.role === 'user');
+  const messageLimit = clampNumber(state.settings.contextMessageLimit, defaultSettings.contextMessageLimit, 2, 200);
+  const contextMode = state.settings.contextMode || defaultSettings.contextMode;
+
+  let selectedMessages = contextMode === 'all'
+    ? conversationMessages
+    : conversationMessages.slice(-messageLimit);
+
+  selectedMessages = limitMessagesByCharacters(selectedMessages, state.settings.contextCharLimit);
+  selectedMessages.forEach(msg => apiMessages.push(messageToApiMessage(msg, latestUserMessage)));
+
+  return apiMessages;
+}
+
 // API call
 async function sendMessage() {
   const input = $('#messageInput');
@@ -252,23 +386,6 @@ async function sendMessage() {
 
   const conv = getCurrentConversation();
   if (!conv) return;
-
-  // Build user message content
-  let userContent;
-  if (images.length > 0) {
-    userContent = [];
-    images.forEach(img => {
-      userContent.push({
-        type: 'image_url',
-        image_url: { url: img.dataUrl }
-      });
-    });
-    if (text) {
-      userContent.push({ type: 'text', text });
-    }
-  } else {
-    userContent = text;
-  }
 
   const userMsg = {
     role: 'user',
@@ -294,28 +411,9 @@ async function sendMessage() {
     conv.title = text.slice(0, 40) || '画像について';
     renderConversationList();
   }
+  saveConversations();
 
-  // Build API messages
-  const apiMessages = [];
-  if (state.settings.systemPrompt) {
-    apiMessages.push({ role: 'system', content: state.settings.systemPrompt });
-  }
-  conv.messages.forEach(m => {
-    if (m.role === 'user') {
-      if (m.images && m.images.length > 0) {
-        const parts = [];
-        m.images.forEach(img => {
-          parts.push({ type: 'image_url', image_url: { url: img } });
-        });
-        if (m.content) parts.push({ type: 'text', text: m.content });
-        apiMessages.push({ role: 'user', content: parts });
-      } else {
-        apiMessages.push({ role: 'user', content: m.content });
-      }
-    } else if (m.role === 'assistant') {
-      apiMessages.push({ role: 'assistant', content: m.content });
-    }
-  });
+  const apiMessages = buildApiMessages(conv);
 
   // Show typing
   const assistantMsg = { role: 'assistant', content: '' };
@@ -342,9 +440,10 @@ async function sendMessage() {
       body: JSON.stringify({
         model: state.settings.model,
         messages: apiMessages,
-        temperature: state.settings.temperature,
-        max_tokens: state.settings.maxTokens,
-        stream: true
+        temperature: clampNumber(state.settings.temperature, defaultSettings.temperature, 0, 2),
+        max_completion_tokens: clampNumber(state.settings.maxTokens, defaultSettings.maxTokens, 1, 128000),
+        stream: true,
+        session_id: conv.id
       }),
       signal: state.abortController.signal
     });
@@ -358,6 +457,7 @@ async function sendMessage() {
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
+    let finishReason = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -375,10 +475,14 @@ async function sendMessage() {
 
         try {
           const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta?.content;
+          const choice = json.choices?.[0];
+          const delta = choice?.delta?.content;
+          if (choice?.finish_reason) {
+            finishReason = choice.finish_reason;
+          }
           if (delta) {
             fullText += delta;
-            contentEl.innerHTML = marked.parse(fullText);
+            contentEl.innerHTML = renderMarkdown(fullText);
             scrollToBottom();
           }
         } catch {}
@@ -386,8 +490,12 @@ async function sendMessage() {
     }
 
     assistantMsg.content = fullText;
+    assistantMsg.finishReason = finishReason;
     conv.messages.push(assistantMsg);
     saveConversations();
+    if (finishReason === 'length') {
+      showError('出力上限に達したため、回答が途中で止まった可能性があります');
+    }
 
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -410,6 +518,19 @@ async function sendMessage() {
 }
 
 // Event listeners
+document.addEventListener('click', (e) => {
+  const copyBtn = e.target.closest('.copy-code-btn');
+  if (copyBtn) {
+    copyCode(copyBtn);
+    return;
+  }
+
+  const image = e.target.closest('.message-image');
+  if (image) {
+    openLightbox(image.src);
+  }
+});
+
 $('#messageInput').addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
@@ -447,15 +568,19 @@ function closeSidebar() {
   const overlay = $('#sidebarOverlay');
   sidebar.classList.remove('open');
   overlay.classList.remove('active');
-  if (window.innerWidth > 768) {
+  if (!isMobileLayout()) {
     sidebar.classList.add('collapsed');
   }
+}
+
+function isMobileLayout() {
+  return window.innerWidth <= 768;
 }
 
 function openSidebar() {
   const sidebar = $('#sidebar');
   const overlay = $('#sidebarOverlay');
-  if (window.innerWidth <= 768) {
+  if (isMobileLayout()) {
     sidebar.classList.add('open');
     overlay.classList.add('active');
   } else {
@@ -465,7 +590,7 @@ function openSidebar() {
 
 $('#sidebarToggle').addEventListener('click', () => {
   const sidebar = $('#sidebar');
-  if (window.innerWidth <= 768) {
+  if (isMobileLayout()) {
     if (sidebar.classList.contains('open')) {
       closeSidebar();
     } else {
@@ -491,9 +616,17 @@ $('#modelSelect').addEventListener('change', function() {
 
 // Settings modal
 $('#settingsBtn').addEventListener('click', () => {
+  const conv = getCurrentConversation();
   $('#settingsModal').classList.remove('hidden');
   $('#apiKeyInput').value = state.settings.apiKey;
   $('#systemPromptInput').value = state.settings.systemPrompt;
+  $('#memoryEnabledInput').checked = Boolean(state.settings.memoryEnabled);
+  $('#globalMemoryInput').value = state.settings.globalMemory || '';
+  $('#conversationSummaryInput').value = conv?.summary || '';
+  $('#contextModeSelect').value = state.settings.contextMode || defaultSettings.contextMode;
+  $('#contextMessageLimitInput').value = state.settings.contextMessageLimit;
+  $('#contextCharLimitInput').value = state.settings.contextCharLimit;
+  $('#includeImageHistoryInput').checked = Boolean(state.settings.includeImageHistory);
   $('#tempSlider').value = state.settings.temperature;
   $('#tempValue').textContent = state.settings.temperature;
   $('#maxTokensInput').value = state.settings.maxTokens;
@@ -512,10 +645,22 @@ $('#toggleApiKey').addEventListener('click', () => {
 });
 
 $('#saveSettingsBtn').addEventListener('click', () => {
+  const conv = getCurrentConversation();
+  const contextMode = $('#contextModeSelect').value;
   state.settings.apiKey = $('#apiKeyInput').value.trim();
   state.settings.systemPrompt = $('#systemPromptInput').value.trim();
-  state.settings.temperature = parseFloat($('#tempSlider').value);
-  state.settings.maxTokens = parseInt($('#maxTokensInput').value) || 4096;
+  state.settings.memoryEnabled = $('#memoryEnabledInput').checked;
+  state.settings.globalMemory = $('#globalMemoryInput').value.trim();
+  state.settings.contextMode = ['recent', 'summary', 'all'].includes(contextMode) ? contextMode : defaultSettings.contextMode;
+  state.settings.contextMessageLimit = clampNumber($('#contextMessageLimitInput').value, defaultSettings.contextMessageLimit, 2, 200);
+  state.settings.contextCharLimit = clampNumber($('#contextCharLimitInput').value, defaultSettings.contextCharLimit, 0, 500000);
+  state.settings.includeImageHistory = $('#includeImageHistoryInput').checked;
+  state.settings.temperature = clampNumber($('#tempSlider').value, defaultSettings.temperature, 0, 2);
+  state.settings.maxTokens = clampNumber($('#maxTokensInput').value, defaultSettings.maxTokens, 1, 128000);
+  if (conv) {
+    conv.summary = $('#conversationSummaryInput').value.trim();
+    saveConversations();
+  }
   saveSettings();
   $('#settingsModal').classList.add('hidden');
 });
